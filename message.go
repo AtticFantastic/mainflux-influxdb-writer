@@ -18,23 +18,12 @@ import (
 	ic "github.com/influxdata/influxdb/client/v2"
 )
 
-const (
-	senMl string = "senml+json"
-	blob  string = "octet-stream"
-)
-
-// writeMessage function
-// Writtes message into DB.
-func writeMessage(nm NatsMsg) error {
-
+func addBpSenML(bp *ic.BatchPoints, nm NatsMsg) error {
 	var s senml.SenML
 	var err error
-	// If msg is senMl, validate it
-	if nm.ContentType == senMl {
-		if s, err = senml.Decode(nm.Payload, senml.JSON); err != nil {
-			println("ERROR")
-			return err
-		}
+	if s, err = senml.Decode(nm.Payload, senml.JSON); err != nil {
+		println("ERROR")
+		return err
 	}
 
 	// Normalize (i.e. resolve) SenMLRecord
@@ -47,12 +36,6 @@ func writeMessage(nm NatsMsg) error {
 
 	// Timestamp
 	t := time.Now().UTC().Format(time.RFC3339)
-
-	// New InfluxDB point batch
-	bp, err := ic.NewBatchPoints(ic.BatchPointsConfig{
-		Database:  InfluxDBName,
-		Precision: InfluxTimePrecision,
-	})
 
 	for _, r := range sn.Records {
 
@@ -88,7 +71,6 @@ func writeMessage(nm NatsMsg) error {
 		}
 
 		fields["channel"] = nm.Channel
-		fields["content_type"] = nm.ContentType
 		fields["publisher"] = nm.Publisher
 		fields["protocol"] = nm.Protocol
 		fields["created"] = t
@@ -98,7 +80,56 @@ func writeMessage(nm NatsMsg) error {
 			log.Print(err)
 			return err
 		}
-		bp.AddPoint(pt)
+		(*bp).AddPoint(pt)
+	}
+
+	return err
+}
+
+func addBpBlob(bp *ic.BatchPoints, nm NatsMsg) error {
+	var err error
+
+	// InfluxDB tags
+	tags := map[string]string{
+		"content_type": nm.ContentType,
+	}
+
+	// InfluxDB fields
+	fields := make(map[string]interface{})
+	fields["blob"] = string(nm.Payload)
+
+	pt, err := ic.NewPoint(nm.Channel, tags, fields, time.Now())
+	if err != nil {
+		log.Print(err)
+		return err
+	}
+	(*bp).AddPoint(pt)
+
+	return err
+}
+
+// writeMessage function
+// Writtes message into DB.
+func writeMessage(nm NatsMsg) error {
+
+	// New InfluxDB point batch
+	var bp ic.BatchPoints
+	var err error
+	if bp, err = ic.NewBatchPoints(ic.BatchPointsConfig{
+		Database:  InfluxDBName,
+		Precision: InfluxTimePrecision,
+	}); err != nil {
+		return err
+	}
+
+	switch nm.ContentType {
+	case "senml+json":
+		err = addBpSenML(&bp, nm)
+	case "octet-stream":
+		err = addBpBlob(&bp, nm)
+	}
+	if err != nil {
+		return err
 	}
 
 	// Write the batch
